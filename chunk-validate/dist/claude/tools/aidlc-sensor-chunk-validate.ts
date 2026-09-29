@@ -89,9 +89,20 @@ function probeChunkAvailable(): void {
     encoding: "utf-8",
     timeout: 10_000,
   });
-  if (result.error || result.status !== 0) {
+  if (result.error && "code" in result.error && result.error.code === "ENOENT") {
     process.stderr.write("chunk-unavailable\n");
     process.exit(127);
+  }
+  if (result.error) {
+    process.stderr.write(`chunk-probe-error: ${result.error.message}\n`);
+    process.exit(2);
+  }
+  if (result.status !== 0) {
+    const detail = result.stderr?.trim();
+    process.stderr.write(
+      `chunk-probe-error: chunk --version exited with status ${result.status}${detail ? `: ${detail}` : ""}\n`,
+    );
+    process.exit(2);
   }
 }
 
