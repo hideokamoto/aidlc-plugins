@@ -22,6 +22,20 @@ export function pendingReleases(plugins: Plugin[], tags: Set<string>): Plugin[] 
   return plugins.filter((plugin) => !tags.has(releaseTag(plugin)));
 }
 
+export interface PublishPlan {
+  /** Versions without a tag: build, tag, push, then create the Release. */
+  push: Plugin[];
+  /** Tagged by an earlier run whose Release creation failed: create the Release only. */
+  releaseOnly: Plugin[];
+}
+
+export function planPublish(plugins: Plugin[], tags: Set<string>, releasedTags: Set<string>): PublishPlan {
+  return {
+    push: pendingReleases(plugins, tags),
+    releaseOnly: plugins.filter((plugin) => tags.has(releaseTag(plugin)) && !releasedTags.has(releaseTag(plugin))),
+  };
+}
+
 function compareVersions(a: string, b: string): number {
   const pa = a.split(/[.+-]/).slice(0, 3).map(Number);
   const pb = b.split(/[.+-]/).slice(0, 3).map(Number);

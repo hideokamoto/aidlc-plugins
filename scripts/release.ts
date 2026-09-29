@@ -6,7 +6,8 @@
 //                      build every plugin, commit main + build outputs onto the
 //                      `release` branch, tag each pending plugin
 //                      `<plugin>--v<version>`, push atomically, and create one
-//                      GitHub Release per tag with a changelog body
+//                      GitHub Release per tag with a changelog body. A rerun
+//                      creates Releases still missing for already-pushed tags.
 //
 // publish needs GITHUB_TOKEN (contents: write). The token is sent as an HTTP
 // header, never embedded in a URL, and is scrubbed from error output.
@@ -23,6 +24,7 @@ import {
   listTags,
   missingVersionBumps,
   pendingReleases,
+  planPublish,
   previousTag,
   releaseTag,
   renderChangelog,
@@ -86,19 +88,34 @@ function releaseCommit(plugins: Plugin[], pending: Plugin[], parent: string | nu
   }
 }
 
+function githubHeaders(token: string | undefined): Record<string, string> {
+  return {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+async function hasGitHubRelease(token: string | undefined, tag: string): Promise<boolean> {
+  const response = await fetch(`https://api.github.com/repos/${repoSlug}/releases/tags/${encodeURIComponent(tag)}`, {
+    headers: githubHeaders(token),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`GitHub Release lookup ${tag}: HTTP ${response.status}`);
+  return true;
+}
+
 async function createGitHubRelease(token: string, tag: string, body: string): Promise<void> {
   const response = await fetch(`https://api.github.com/repos/${repoSlug}/releases`, {
     method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
+    headers: githubHeaders(token),
     body: JSON.stringify({ tag_name: tag, name: tag, body }),
   });
-  if (!response.ok) {
-    throw new Error(`GitHub Release ${tag}: HTTP ${response.status} ${await response.text()}`);
-  }
+  if (response.ok) return;
+  const text = await response.text();
+  // A concurrent or earlier run already created it: the goal state holds.
+  if (response.status === 422 && text.includes("already_exists")) return;
+  throw new Error(`GitHub Release ${tag}: HTTP ${response.status} ${text}`);
 }
 
 async function publish(dryRun: boolean): Promise<void> {
@@ -111,50 +128,76 @@ async function publish(dryRun: boolean): Promise<void> {
   if (stale.length > 0) {
     fail(`version bump required before release: ${stale.map((plugin) => plugin.key).join(", ")}`);
   }
-  const pending = pendingReleases(plugins, tags);
-  if (pending.length === 0) {
-    console.log("nothing to release: every plugin version is already tagged");
+
+  const releasedTags = new Set<string>();
+  for (const plugin of plugins) {
+    const tag = releaseTag(plugin);
+    if (!tags.has(tag)) continue;
+    try {
+      if (await hasGitHubRelease(token, tag)) releasedTags.add(tag);
+    } catch (error) {
+      if (!dryRun) throw error;
+      console.warn(`dry run: could not look up the Release for ${tag}; assuming it exists`);
+      releasedTags.add(tag);
+    }
+  }
+  const plan = planPublish(plugins, tags, releasedTags);
+  if (plan.push.length === 0 && plan.releaseOnly.length === 0) {
+    console.log("nothing to release: every plugin version is tagged and has a GitHub Release");
     return;
   }
 
-  const version = buildVersion();
-  fetchRuntime(version);
-  for (const plugin of plugins) buildPlugin(version, plugin);
-  writeCatalog(plugins);
-
-  let parent: string | null;
-  try {
-    parent = remoteReleaseHead(token);
-  } catch (error) {
-    if (!dryRun) throw error;
-    console.warn(`dry run: could not read the remote ${RELEASE_BRANCH} branch; assuming none`);
-    parent = null;
-  }
-  const commit = releaseCommit(plugins, pending, parent, version);
-  const notes = pending.map((plugin) => {
+  const notes = [
+    // New tags: changes up to the commit being released.
+    ...plan.push.map((plugin) => ({ plugin, ref: "HEAD" })),
+    // Tags from an earlier run: changes up to that tag, not today's HEAD.
+    ...plan.releaseOnly.map((plugin) => ({ plugin, ref: releaseTag(plugin) })),
+  ].map(({ plugin, ref }) => {
     const tag = releaseTag(plugin);
     const previous = previousTag(plugin, tags, tag);
-    return { tag, body: renderChangelog(plugin, previous, commitsSince(REPO_ROOT, plugin, previous)) };
+    return { tag, body: renderChangelog(plugin, previous, commitsSince(REPO_ROOT, plugin, previous, ref)) };
   });
 
-  console.log(`release commit ${commit} (parent ${parent ?? "none"})`);
+  let commit: string | null = null;
+  if (plan.push.length > 0) {
+    const version = buildVersion();
+    fetchRuntime(version);
+    for (const plugin of plugins) buildPlugin(version, plugin);
+    writeCatalog(plugins);
+
+    let parent: string | null;
+    try {
+      parent = remoteReleaseHead(token);
+    } catch (error) {
+      if (!dryRun) throw error;
+      console.warn(`dry run: could not read the remote ${RELEASE_BRANCH} branch; assuming none`);
+      parent = null;
+    }
+    commit = releaseCommit(plugins, plan.push, parent, version);
+    console.log(`release commit ${commit} (parent ${parent ?? "none"})`);
+  }
+  for (const plugin of plan.releaseOnly) {
+    console.log(`${releaseTag(plugin)} is already pushed; creating its missing GitHub Release`);
+  }
   for (const { tag, body } of notes) console.log(`\n# ${tag}\n\n${body}`);
   if (dryRun) {
     console.log("dry run: nothing pushed");
     return;
   }
 
-  const refspecs = [
-    `${commit}:refs/heads/${RELEASE_BRANCH}`,
-    ...notes.map(({ tag }) => `${commit}:refs/tags/${tag}`),
-  ];
-  try {
-    // --atomic: the branch and every tag land together or not at all.
-    // Without --force the branch push is refused unless it fast-forwards.
-    git(REPO_ROOT, [...authArgs(token!), "push", "--atomic", `https://github.com/${repoSlug}.git`, ...refspecs]);
-  } catch (error) {
-    const err = error as { stderr?: string; message?: string };
-    fail(`push failed: ${scrub(String(err.stderr ?? err.message ?? error), token!)}`);
+  if (commit !== null) {
+    const refspecs = [
+      `${commit}:refs/heads/${RELEASE_BRANCH}`,
+      ...plan.push.map((plugin) => `${commit}:refs/tags/${releaseTag(plugin)}`),
+    ];
+    try {
+      // --atomic: the branch and every tag land together or not at all.
+      // Without --force the branch push is refused unless it fast-forwards.
+      git(REPO_ROOT, [...authArgs(token!), "push", "--atomic", `https://github.com/${repoSlug}.git`, ...refspecs]);
+    } catch (error) {
+      const err = error as { stderr?: string; message?: string };
+      fail(`push failed: ${scrub(String(err.stderr ?? err.message ?? error), token!)}`);
+    }
   }
   for (const { tag, body } of notes) {
     await createGitHubRelease(token!, tag, body);

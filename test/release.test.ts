@@ -9,6 +9,7 @@ import {
   listTags,
   missingVersionBumps,
   pendingReleases,
+  planPublish,
   previousTag,
   releaseTag,
   renderChangelog,
@@ -56,6 +57,23 @@ describe("pendingReleases", () => {
     git(repo, ["tag", "aidlc-beta--v1.0.0"]);
     const pending = pendingReleases(discoverPlugins(repo), listTags(repo));
     expect(pending.map(releaseTag)).toEqual(["aidlc-alpha--v0.1.0"]);
+  });
+});
+
+describe("planPublish", () => {
+  it("pushes untagged versions and only creates Releases for tags that lack one", () => {
+    git(repo, ["tag", "aidlc-alpha--v0.1.0"]);
+    const plan = planPublish(discoverPlugins(repo), listTags(repo), new Set());
+    expect(plan.push.map(releaseTag)).toEqual(["aidlc-beta--v1.0.0"]);
+    // alpha's tag was pushed by an earlier run whose Release creation failed.
+    expect(plan.releaseOnly.map(releaseTag)).toEqual(["aidlc-alpha--v0.1.0"]);
+  });
+
+  it("does nothing for a tag that already has its Release", () => {
+    git(repo, ["tag", "aidlc-alpha--v0.1.0"]);
+    git(repo, ["tag", "aidlc-beta--v1.0.0"]);
+    const plan = planPublish(discoverPlugins(repo), listTags(repo), new Set(["aidlc-alpha--v0.1.0", "aidlc-beta--v1.0.0"]));
+    expect(plan).toEqual({ push: [], releaseOnly: [] });
   });
 });
 

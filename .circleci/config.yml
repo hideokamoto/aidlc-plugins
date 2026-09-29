@@ -65,6 +65,9 @@ workflows:
     jobs:
       - test
       - release:
+          # Consecutive merges must not release in parallel: the release
+          # branch push is fast-forward only, so the later job would fail.
+          serial-group: << pipeline.project.slug >>/release
           requires:
             - test
           filters:

@@ -15,13 +15,28 @@ export function distDir(plugin: Plugin): string {
 }
 
 export function buildPlugin(version: string, plugin: Plugin, outDir = distDir(plugin)): void {
-  const stdout = execFileSync(
-    "bun",
-    [runtimeTool(version, "aidlc-plugin-build.ts"), plugin.dir, HARNESS, outDir, "--json"],
-    { encoding: "utf-8", stdio: ["ignore", "pipe", "inherit"] },
-  );
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      "bun",
+      [runtimeTool(version, "aidlc-plugin-build.ts"), plugin.dir, HARNESS, outDir, "--json"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "inherit"] },
+    );
+  } catch (error) {
+    // On rejection the tool prints its JSON report to stdout, then exits 1.
+    // Surface that report; rethrow anything that is not one.
+    const report = String((error as { stdout?: unknown }).stdout ?? "");
+    let parsed: { errors?: unknown[] } | undefined;
+    try {
+      parsed = JSON.parse(report) as { errors?: unknown[] };
+    } catch {
+      throw error;
+    }
+    if (!parsed?.errors?.length) throw error;
+    stdout = report;
+  }
   const result = JSON.parse(stdout) as { valid: boolean; errors: unknown[] };
-  if (!result.valid) {
+  if (!result.valid || result.errors.length > 0) {
     throw new Error(`${plugin.key}: aidlc-plugin-build rejected the plugin: ${JSON.stringify(result.errors)}`);
   }
 }
