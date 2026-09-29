@@ -1,0 +1,72 @@
+version: 2.1
+
+# test:    every push. Type-checks, runs Vitest against every AI-DLC core
+#          release in aidlc-versions.json, checks version bumps, builds, and
+#          validates the marketplace catalogue with Claude Code's validator.
+# release: main only, after test. Builds, commits main + build outputs onto
+#          the `release` branch, tags `<plugin>--v<version>`, pushes, and
+#          creates a GitHub Release per tag (scripts/release.ts). Needs the
+#          project environment variable GITHUB_TOKEN (contents: write).
+
+executors:
+  node:
+    docker:
+      - image: cimg/node:22.22.2
+
+commands:
+  setup:
+    steps:
+      - checkout
+      - run:
+          name: Fetch tags
+          command: git fetch --tags --force origin
+      - run:
+          name: Install bun and pnpm
+          command: |
+            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.11"
+            mkdir -p "$HOME/bin"
+            corepack enable --install-directory "$HOME/bin"
+            echo 'export PATH="$HOME/.bun/bin:$HOME/bin:$PATH"' >> "$BASH_ENV"
+      - run: pnpm install --frozen-lockfile
+      - restore_cache:
+          keys:
+            - aidlc-runtime-{{ checksum "aidlc-versions.json" }}
+      - run: pnpm fetch-runtime
+      - save_cache:
+          key: aidlc-runtime-{{ checksum "aidlc-versions.json" }}
+          paths:
+            - .aidlc-cache
+
+jobs:
+  test:
+    executor: node
+    steps:
+      - setup
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run:
+          name: Require a version bump for shipped changes to released plugins
+          command: pnpm release check
+      - run: pnpm build
+      - run:
+          name: Validate the marketplace catalogue
+          command: pnpm dlx @anthropic-ai/claude-code@2.1.284 plugin validate .
+
+  release:
+    executor: node
+    steps:
+      - setup
+      - run:
+          name: Build, tag, push, and publish GitHub Releases
+          command: pnpm release publish
+
+workflows:
+  test-and-release:
+    jobs:
+      - test
+      - release:
+          requires:
+            - test
+          filters:
+            branches:
+              only: main

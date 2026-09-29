@@ -1,0 +1,4 @@
+{
+  "$comment": "AI-DLC core releases every plugin is built and tested against. The first entry builds the published dist.",
+  "versions": ["2.10.0"]
+}
