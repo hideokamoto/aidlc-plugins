@@ -1,0 +1,16 @@
+{
+  "name": "solo-developer",
+  "version": "0.1.0",
+  "description": "AI-DLC plugin for single-developer projects: when project memory declares a sole developer, intent-capture stops asking stakeholder, decision-maker, and reporting questions and builds the stakeholder map from that declaration.",
+  "author": {
+    "name": "hideokamoto"
+  },
+  "dependencies": [
+    "core"
+  ],
+  "aidlc": {
+    "contributes": {
+      "overlays": "contributions/"
+    }
+  }
+}
