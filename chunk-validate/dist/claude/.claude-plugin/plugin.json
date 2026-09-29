@@ -1,0 +1,8 @@
+{
+  "name": "aidlc-chunk-validate",
+  "version": "0.1.0",
+  "description": "Advisory AI-DLC sensor that runs `chunk validate` on a Chunk sidecar against code written during the code-generation stage.",
+  "author": {
+    "name": "hideokamoto"
+  }
+}
