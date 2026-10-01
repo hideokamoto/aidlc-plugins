@@ -115,7 +115,16 @@ describe("alloy-check tool", () => {
   it("reports the counterexample's witness for a combination bug", () => {
     const { verdict } = runTool(["--file", join(FIXTURES, "counterexample.md")]);
     expect(verdict.counterexamples).toEqual(["check OnlyOwnerOrTeamCanEdit for 4"]);
-    expect(verdict.output).toContain("$OnlyOwnerOrTeamCanEdit_d");
+    expect(verdict.output).toContain("skolem $OnlyOwnerOrTeamCanEdit_d=");
+  });
+
+  it("shows the counterexample from Alloy's text solution, not receipt.json's instance values", () => {
+    // receipt.json in 6.2.0 lists atoms shifted by one index; the text
+    // solution names the model's relations with the atoms the witness uses.
+    const { verdict } = runTool(["--file", join(FIXTURES, "counterexample.md")]);
+    expect(verdict.output).toMatch(/^this\/Doc<:team=/m);
+    expect(verdict.output).toMatch(/^this\/Doc<:editors=/m);
+    expect(verdict.output).not.toMatch(/^univ=/m);
   });
 
   it("reports contradictory facts instead of passing every check vacuously", () => {

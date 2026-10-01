@@ -60,9 +60,12 @@ bun .claude/tools/alloy-check.ts --stage functional-design --output-path <functi
 bun .claude/tools/alloy-check.ts --file <functional-spec.md | model.als>
 ```
 
-It runs `java -jar org.alloytools.alloy.dist.jar exec -f -q -t json -c '*'`.
+It runs `java -jar org.alloytools.alloy.dist.jar exec -f -q -t text -c '*'`.
 `exec` exits 0 even when a counterexample exists, so the verdict is read from
 the `receipt.json` it writes: a command with a `solution` found an instance.
+The counterexample is reported from the text solution file, because the
+instance values inside `receipt.json` are wrong in 6.2.0 (atom indices shifted
+by one, `one` fields shown empty).
 The JAR is resolved from `$ALLOY_JAR`, `./.alloy/`, then `~/.alloy/`.
 
 ## Install
@@ -91,6 +94,16 @@ contradictory-facts / unchecked-assert / syntax-error / not-applicable /
 missing-section fixtures, and the engine's sensor dispatcher reporting
 `passed` / `failed` for them.
 
-Not verified: a full AI-DLC workflow being refused at functional-design's gate,
-the property tests code-generation generates, and Chunk sidecar execution.
+Trial run (same setup as `quint/README.md`): with BR1.1 written only for
+clients that have a tenant, the functional-design gate was refused naming
+`alloy-check`; the counterexample was a guest client holding a tenant's item.
+That trial also showed that the instance values inside 6.2.0's `receipt.json`
+are wrong (atom indices shifted by one), so counterexamples are now reported
+from the text solution. After the fix the gate was presented. A fast-check
+property for the assert and a rejection test for the fact passed on a correct
+implementation and failed when guests skipped the tenant check (shrunk to one
+guest reservation).
+
+Not verified: the reviewer step and summary confirmation together with the
+sensor, and Chunk sidecar execution (named commands were run with `--local`).
 Alloy's `check` is a bounded search within the stated scope, not a proof.

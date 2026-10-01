@@ -26,7 +26,7 @@
 //   - every `run` finds an instance. A `run` without one means the facts
 //     contradict each other, which makes every `check` pass vacuously.
 //
-// Alloy is run as `java -jar <jar> exec -f -q -t json -c '*' -o <dir> <model>`.
+// Alloy is run as `java -jar <jar> exec -f -q -t text -c '*' -o <dir> <model>`.
 // `exec` exits 0 whether or not a counterexample exists; the verdict comes from
 // the receipt.json it writes: a command with a `solution` entry found an
 // instance (a counterexample for `check`, a witness for `run`).
@@ -253,14 +253,28 @@ export function judgeReceipt(receipt: Receipt): Pick<Verdict, "commands" | "coun
   };
 }
 
+/** The model's relations and skolem witnesses from a text solution, without the built-in sets. */
+export function solutionText(path: string): string {
+  if (!existsSync(path)) return `(no solution file at ${path})`;
+  return readFileSync(path, "utf-8")
+    .split(/\r?\n/)
+    .filter((line) => !/^(univ|Int|seq\/Int|String|none)=/.test(line) && !/^-+(Trace|State \d+.*)-+$/.test(line))
+    .join("\n")
+    .trim();
+}
+
 function check(java: string, jar: string, source: string, base: Verdict): Verdict {
   const work = mkdtempSync(join(tmpdir(), "alloy-check-"));
   try {
     const model = join(work, "model.als");
     const out = join(work, "out");
     writeFileSync(model, source.endsWith("\n") ? source : `${source}\n`);
-    const argv = ["-jar", jar, "exec", "-f", "-q", "-t", "json", "-c", "*", "-o", out, model];
-    const command = `java -jar ${JAR_NAME} exec -f -q -t json -c '*' -o out model.als`;
+    // Text output: the verdict comes from receipt.json, which exec writes for
+    // every output type, while the instance is shown from the text solution.
+    // The instance values inside receipt.json are not reliable in 6.2.0 (atoms
+    // shifted by one index, `one` fields shown empty).
+    const argv = ["-jar", jar, "exec", "-f", "-q", "-t", "text", "-c", "*", "-o", out, model];
+    const command = `java -jar ${JAR_NAME} exec -f -q -t text -c '*' -o out model.als`;
     const result = spawnSync(java, argv, { encoding: "utf-8", timeout: EXEC_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
     const output = tail(
       `${result.stdout ?? ""}\n${result.stderr ?? ""}`
@@ -282,12 +296,10 @@ function check(java: string, jar: string, source: string, base: Verdict): Verdic
     if (judged.counterexamples!.length > 0) failures.push(`counterexample found: ${judged.counterexamples!.join("; ")}`);
     if (judged.vacuousRuns!.length > 0) failures.push(`no instance (facts may contradict): ${judged.vacuousRuns!.join("; ")}`);
     if (failures.length === 0) return { ...base, pass: true, phase: "ok", command, ...judged };
-    // Keep the instances of the failing checks for the report.
-    const instances = Object.fromEntries(
-      Object.entries(receipt.commands ?? {})
-        .filter(([, c]) => c.type === "check" && Array.isArray(c.solution) && c.solution.length > 0)
-        .map(([name, c]) => [name, c.solution]),
-    );
+    const counterexampleText = Object.entries(receipt.commands ?? {})
+      .filter(([, c]) => c.type === "check" && Array.isArray(c.solution) && c.solution.length > 0)
+      .map(([name]) => `--- ${name} ---\n${solutionText(join(out, `${name}-solution-0.txt`))}`)
+      .join("\n");
     return {
       ...base,
       pass: false,
@@ -295,8 +307,7 @@ function check(java: string, jar: string, source: string, base: Verdict): Verdic
       command,
       ...judged,
       reason: failures.join(" | "),
-      // The instance starts with the skolem witnesses, so keep the head.
-      output: JSON.stringify(instances).slice(0, OUTPUT_TAIL_LIMIT),
+      output: counterexampleText.slice(0, OUTPUT_TAIL_LIMIT),
     };
   } finally {
     rmSync(work, { recursive: true, force: true });

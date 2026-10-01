@@ -24,7 +24,7 @@ functional-design の `functional-spec.md` にある `## Alloy Structural Check`
 - `Applicability: not-applicable — <理由>` の場合は、理由があり、`alloy` ブロックが
   無ければ合格にする。Java は呼ばない。
 - `Applicability: applicable` の場合は、`alloy` フェンスブロックを取り出し、
-  `java -jar org.alloytools.alloy.dist.jar exec -t json -c '*'` で全コマンドを実行する。
+  `java -jar org.alloytools.alloy.dist.jar exec -t text -c '*'` で全コマンドを実行する。
   次のすべてを満たすときだけ合格にする。
   - すべての `assert` に `check` コマンドがある
   - `run` コマンドが1つ以上ある
@@ -34,6 +34,8 @@ functional-design の `functional-spec.md` にある `## Alloy Structural Check`
     すべての `check` が空虚に合格してしまう）
 
 `exec` は反例があっても終了コード 0 を返すため、判定は出力の `receipt.json` で行う。
+反例の表示には、`receipt.json` の値ではなくテキストの解（`<コマンド名>-solution-0.txt`）を使う。
+6.2.0 の `receipt.json` に入るインスタンスの値は、原子の番号が1つずれるなど正しくないため。
 `solution` を持つコマンドが、インスタンス（`check` なら反例）を見つけたコマンドである。
 
 ## Gate behaviour

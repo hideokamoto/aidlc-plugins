@@ -52,20 +52,24 @@ run Example { some d: Doc | some d.editors } for 3
 
 ## Reading a counterexample
 
-The tool reports the failing check's instance from Alloy's `receipt.json`:
-`skolems` names the witness (for example `$OnlyOwnerOrTeamCanEdit_d` is the
-document that breaks the assert) and `values` lists each atom's fields. Write it
+The tool reports the failing check's instance as Alloy's text solution:
+one line per relation (`this/Doc<:editors={Doc$0->User$1}`), then
+`skolem $OnlyOwnerOrTeamCanEdit_d={Doc$0}` naming the witness that breaks the
+assert. An atom missing from a relation line has no value for that field (for
+example a document without a team). Write it
 back in domain words: which user, which document, which team, and which `fact`s
 allowed that combination.
 
 ## Running
 
 ```bash
-java -jar org.alloytools.alloy.dist.jar exec -f -q -t json -c '*' -o out model.als
+java -jar org.alloytools.alloy.dist.jar exec -f -q -t text -c '*' -o out model.als
 ```
 
 - `-c '*'` runs every command; without it only the first one runs.
 - `exec` exits 0 even when a check finds a counterexample. The verdict is in
   `out/receipt.json`: a command with a `solution` entry found an instance.
+  Read the instance itself from `out/<command>-solution-0.txt`; the instance
+  values inside `receipt.json` are wrong in 6.2.0.
 - A syntax or type error makes `exec` exit 1 and print the line and column
   within the model.
