@@ -1,0 +1,5 @@
+node_modules/
+.aidlc-cache/
+# Built by CD (scripts/release.ts) and committed only on the `release` branch.
+*/dist/
+.claude-plugin/
