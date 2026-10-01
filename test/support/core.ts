@@ -46,43 +46,67 @@ export function compose(version: string, pluginDir: string): { project: string; 
   return { project, result: JSON.parse(stdout) as ComposeResult };
 }
 
+export interface Installation {
+  project: string;
+  /** Points the project's plugin tool at the temporary registry; `CLAUDE_PLUGIN_ROOT` is unset. */
+  env: NodeJS.ProcessEnv;
+  /** Install path of each plugin, keyed by plugin key. */
+  roots: Map<string, string>;
+}
+
 /**
  * Install built plugins the way a user does: Claude Code records them in its
- * plugin registry, and the SessionStart hook runs the project's
- * `aidlc-plugin.ts sync`. The registry and settings files are temporary, so
- * the machine's real Claude configuration is never read or written.
+ * plugin registry. The registry and settings files are temporary, so the
+ * machine's real Claude configuration is never read or written. Nothing is
+ * composed yet.
  */
-export function installAndSync(version: string, plugins: Plugin[]): string {
+export function installPlugins(version: string, plugins: Plugin[]): Installation {
   const project = freshProject(version);
   const home = mkdtempSync(join(tmpdir(), "aidlc-claude-home-"));
   const registry: Record<string, Array<{ installPath: string; version: string }>> = {};
+  const roots = new Map<string, string>();
   for (const plugin of plugins) {
     const installPath = join(home, "plugins", plugin.key);
     mkdirSync(join(home, "plugins"), { recursive: true });
     buildPlugin(version, plugin, installPath);
     registry[`${plugin.hostName}@aidlc-plugins`] = [{ installPath, version: plugin.manifest.version }];
+    roots.set(plugin.key, installPath);
   }
   writeFileSync(join(home, "installed_plugins.json"), JSON.stringify({ version: 2, plugins: registry }));
   writeFileSync(join(home, "settings.json"), "{}");
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    AIDLC_HARNESS_DIR: ".claude",
+    AIDLC_HARNESS_NAME: "claude",
+    AIDLC_CLAUDE_PLUGIN_REGISTRY: join(home, "installed_plugins.json"),
+    AIDLC_CLAUDE_SETTINGS: join(home, "settings.json"),
+    CLAUDE_CONFIG_DIR: home,
+  };
   delete env.CLAUDE_PLUGIN_ROOT;
+  return { project, env, roots };
+}
+
+/**
+ * Run the project's `aidlc-plugin.ts sync` once without `CLAUDE_PLUGIN_ROOT`:
+ * it reads the registry and composes every installed plugin in one run.
+ */
+export function syncAll({ project, env, roots }: Installation): void {
   const stdout = execFileSync("bun", [join(project, ".claude", "tools", "aidlc-plugin.ts"), "sync", "--json"], {
     cwd: project,
     encoding: "utf-8",
-    env: {
-      ...env,
-      AIDLC_HARNESS_DIR: ".claude",
-      AIDLC_HARNESS_NAME: "claude",
-      AIDLC_CLAUDE_PLUGIN_REGISTRY: join(home, "installed_plugins.json"),
-      AIDLC_CLAUDE_SETTINGS: join(home, "settings.json"),
-      CLAUDE_CONFIG_DIR: home,
-    },
+    env,
   });
   const result = JSON.parse(stdout) as { ok: boolean; data: { synced: string[] } };
-  if (!result.ok || result.data.synced.length !== plugins.length) {
+  if (!result.ok || result.data.synced.length !== roots.size) {
     throw new Error(`plugin sync did not install every plugin: ${stdout}`);
   }
-  return project;
+}
+
+/** Install built plugins and compose them, as the SessionStart hook does on the next session. */
+export function installAndSync(version: string, plugins: Plugin[]): string {
+  const installation = installPlugins(version, plugins);
+  syncAll(installation);
+  return installation.project;
 }
 
 export function coreStage(version: string, relative: string): string {
