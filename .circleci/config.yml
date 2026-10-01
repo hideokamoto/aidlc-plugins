@@ -42,6 +42,12 @@ jobs:
     executor: node
     steps:
       - setup
+      - run:
+          name: Install a Java runtime (the alloy plugin's tests run Alloy 6.2.0)
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends openjdk-21-jre-headless
+            java -version
       - run: pnpm typecheck
       - run: pnpm test
       - run:
