@@ -87,6 +87,14 @@ job fails when files that reach an install (`.aidlc-plugin`, `contributions`,
 current version was tagged, because users only receive a new copy when the
 version changes. README and `tests/` changes need no bump.
 
+Changing the first version in `aidlc-versions.json` (the core that builds the
+published dist) also requires a bump of every already-released plugin: the
+build injects that core's `hooks/compose.ts` and `hooks/hooks.json`, and
+`release` rebuilds every plugin, so a new build core changes what a tagged
+version ships. The check compares the first entry at `HEAD` with the one at
+each plugin's tag; a tag without `aidlc-versions.json` counts as changed.
+Adding or removing the other entries (cores only tested against) needs no bump.
+
 `pnpm release publish --dry-run` prints the release commit and changelogs
 without pushing.
 

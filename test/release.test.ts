@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverPlugins, type Plugin } from "../scripts/lib/plugins.ts";
 import {
   commitsSince,
+  compareVersions,
   git,
   listTags,
   missingVersionBumps,
@@ -13,6 +14,7 @@ import {
   previousTag,
   releaseTag,
   renderChangelog,
+  versionBumpReasons,
 } from "../scripts/lib/release.ts";
 
 let repo: string;
@@ -24,6 +26,10 @@ function write(path: string, content: string): void {
 
 function setVersion(key: string, version: string): void {
   write(`${key}/.aidlc-plugin/plugin.json`, JSON.stringify({ name: key, version, description: `${key} plugin` }));
+}
+
+function setCoreVersions(versions: string[]): void {
+  write("aidlc-versions.json", JSON.stringify({ versions }));
 }
 
 function commit(message: string): string {
@@ -47,6 +53,7 @@ beforeEach(() => {
   setVersion("alpha", "0.1.0");
   write("alpha/contributions/x.md", "one\n");
   setVersion("beta", "1.0.0");
+  setCoreVersions(["2.10.0"]);
   commit("feat(alpha): initial");
 });
 
@@ -101,6 +108,52 @@ describe("missingVersionBumps", () => {
     expect(missingVersionBumps(repo, discoverPlugins(repo), tags)).toEqual([]);
     expect(pendingReleases(discoverPlugins(repo), tags).map(releaseTag)).toEqual(["aidlc-alpha--v0.2.0", "aidlc-beta--v1.0.0"]);
   });
+
+  // publish rebuilds every plugin's dist with the first core version, and the
+  // build injects that core's hooks/compose.ts and hooks.json. A new build core
+  // therefore changes what an already-tagged version ships.
+  it("flags a tagged plugin when the build core version changed since its tag", () => {
+    setCoreVersions(["2.11.0", "2.10.0"]);
+    commit("chore: build with aidlc 2.11.0");
+    expect(missingVersionBumps(repo, discoverPlugins(repo), listTags(repo)).map((p) => p.key)).toEqual(["alpha"]);
+    const stale = versionBumpReasons(repo, discoverPlugins(repo), listTags(repo));
+    expect(stale.map(({ plugin }) => plugin.key)).toEqual(["alpha"]);
+    expect(stale[0].reasons).toEqual(["build core changed since aidlc-alpha--v0.1.0 (2.10.0 -> 2.11.0)"]);
+  });
+
+  it("ignores core versions that are only tested against, not built with", () => {
+    setCoreVersions(["2.10.0", "2.9.0"]);
+    commit("test: also test against aidlc 2.9.0");
+    expect(missingVersionBumps(repo, discoverPlugins(repo), listTags(repo))).toEqual([]);
+  });
+
+  it("flags a tagged plugin whose tag has no aidlc-versions.json", () => {
+    git(repo, ["tag", "-d", "aidlc-alpha--v0.1.0"]);
+    git(repo, ["rm", "-q", "aidlc-versions.json"]);
+    commit("chore: drop core pin");
+    git(repo, ["tag", "aidlc-alpha--v0.1.0"]);
+    setCoreVersions(["2.10.0"]);
+    commit("chore: pin core");
+    const stale = versionBumpReasons(repo, discoverPlugins(repo), listTags(repo));
+    expect(stale.map(({ plugin }) => plugin.key)).toEqual(["alpha"]);
+    expect(stale[0].reasons).toEqual(["build core changed since aidlc-alpha--v0.1.0 (unknown -> 2.10.0)"]);
+  });
+
+  it("reports both reasons when shipped files and the build core changed", () => {
+    write("alpha/contributions/x.md", "two\n");
+    setCoreVersions(["2.11.0"]);
+    commit("chore: rebuild");
+    const stale = versionBumpReasons(repo, discoverPlugins(repo), listTags(repo));
+    expect(stale.map(({ plugin }) => plugin.key)).toEqual(["alpha"]);
+    expect(stale[0].reasons).toHaveLength(2);
+  });
+
+  it("accepts a core change once the version is bumped", () => {
+    setCoreVersions(["2.11.0"]);
+    setVersion("alpha", "0.1.1");
+    commit("chore(alpha): rebuild with aidlc 2.11.0");
+    expect(missingVersionBumps(repo, discoverPlugins(repo), listTags(repo))).toEqual([]);
+  });
 });
 
 describe("previousTag", () => {
@@ -117,6 +170,39 @@ describe("previousTag", () => {
     git(repo, ["tag", "aidlc-alpha--v1.0.0"]);
     git(repo, ["tag", "aidlc-alpha--v1.0.0-rc.1"]);
     expect(previousTag(plugin("alpha"), listTags(repo))).toBe("aidlc-alpha--v1.0.0");
+  });
+
+  it("orders numeric prerelease identifiers numerically", () => {
+    git(repo, ["tag", "aidlc-alpha--v1.0.0-rc.2"]);
+    git(repo, ["tag", "aidlc-alpha--v1.0.0-rc.10"]);
+    git(repo, ["tag", "aidlc-alpha--v1.0.0-rc.11"]);
+    expect(previousTag(plugin("alpha"), listTags(repo), "aidlc-alpha--v1.0.0-rc.11")).toBe("aidlc-alpha--v1.0.0-rc.10");
+  });
+});
+
+describe("compareVersions", () => {
+  it("follows SemVer 2.0.0 section 11 precedence", () => {
+    // The ordered example from https://semver.org/#spec-item-11, plus releases.
+    const ordered = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+      "1.0.1",
+      "1.1.0",
+      "2.0.0",
+    ];
+    expect([...ordered].reverse().sort(compareVersions)).toEqual(ordered);
+    expect([...ordered].sort().sort(compareVersions)).toEqual(ordered);
+  });
+
+  it("ignores build metadata", () => {
+    expect(compareVersions("1.0.0+build.1", "1.0.0+build.2")).toBe(0);
+    expect(compareVersions("1.0.0-rc.1+x", "1.0.0")).toBeLessThan(0);
   });
 });
 

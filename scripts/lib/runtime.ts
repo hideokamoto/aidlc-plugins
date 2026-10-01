@@ -10,17 +10,24 @@ import { CACHE_ROOT, REPO_ROOT } from "./paths.ts";
 export const HARNESS = "claude";
 const RELEASE_BASE = "https://github.com/awslabs/aidlc-workflows/releases/download";
 
-export function pinnedVersions(file = join(REPO_ROOT, "aidlc-versions.json")): string[] {
-  const parsed: unknown = JSON.parse(readFileSync(file, "utf-8"));
+export const VERSIONS_FILE = "aidlc-versions.json";
+
+/** Parse the content of aidlc-versions.json; `source` names it in errors. */
+export function parseVersions(text: string, source: string): string[] {
+  const parsed: unknown = JSON.parse(text);
   const versions = (parsed as { versions?: unknown }).versions;
   if (
     !Array.isArray(versions) ||
     versions.length === 0 ||
     !versions.every((v) => typeof v === "string" && /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(v))
   ) {
-    throw new Error(`${file}: "versions" must be a non-empty array of release versions`);
+    throw new Error(`${source}: "versions" must be a non-empty array of release versions`);
   }
   return versions as string[];
+}
+
+export function pinnedVersions(file = join(REPO_ROOT, VERSIONS_FILE)): string[] {
+  return parseVersions(readFileSync(file, "utf-8"), file);
 }
 
 /** The version whose tooling builds the published dist. */
