@@ -3,7 +3,7 @@
 // ci-pipeline. These tests pin the core facts that design depends on, where the
 // prose lands, and the check tool's verdicts against the real quint CLI.
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -11,7 +11,13 @@ import { discoverPlugins } from "../../scripts/lib/plugins.ts";
 import { REPO_ROOT } from "../../scripts/lib/paths.ts";
 import { pinnedVersions } from "../../scripts/lib/runtime.ts";
 import { composedStage, coreStage, installAndSync, stepSection } from "../../test/support/core.ts";
-import { extractFromMarkdown, resolveConfig } from "../tools/quint-check.ts";
+import {
+  declaredInvariants,
+  extractFromMarkdown,
+  moduleName,
+  resolveConfig,
+  stripCommentsAndStrings,
+} from "../tools/quint-check.ts";
 
 const plugin = discoverPlugins().find((p) => p.key === "quint")!;
 const TOOL = join(plugin.dir, "tools", "quint-check.ts");
@@ -81,6 +87,90 @@ describe("quint-check tool", () => {
     const extracted = extractFromMarkdown(fixture("dropped-invariant"));
     if (!extracted.applicable) throw new Error("fixture must be applicable");
     expect(() => resolveConfig(extracted.source, extracted.config, {})).toThrow(/inv_nonNegative/);
+  });
+
+  describe("comments and string literals", () => {
+    it("blanks // and /* */ comments, keeping line breaks", () => {
+      const source = 'module m {\n  // val inv_a = true\n  val x = /* inline */ 1\n  /* val inv_b = true\n  val inv_c = true */\n}';
+      const code = stripCommentsAndStrings(source);
+      expect(code.split("\n")).toHaveLength(source.split("\n").length);
+      expect(code).not.toMatch(/inv_|inline/);
+      expect(code).toMatch(/val x = +1/);
+    });
+
+    it("does not nest block comments (quint does not either)", () => {
+      // `quint typecheck` rejects `/* a /* b */ c */`: the first */ closes it.
+      expect(stripCommentsAndStrings("/* a /* b */ c */")).toBe(`${" ".repeat(12)} c */`);
+    });
+
+    it("treats // and /* inside a string literal as string content", () => {
+      // Quint strings have no escape sequences and may span lines.
+      const code = stripCommentsAndStrings('val s = "a // b /* c"\nval inv_a = true');
+      expect(code).toContain("val inv_a = true");
+      expect(code).not.toMatch(/a \/\/ b/);
+    });
+
+    it("blanks an unterminated block comment to the end", () => {
+      const comment = "/* val inv_a = true";
+      expect(stripCommentsAndStrings(`val x = 1 ${comment}`)).toBe(`val x = 1 ${" ".repeat(comment.length)}`);
+    });
+
+    it("ignores commented-out and quoted inv_ declarations", () => {
+      const source = [
+        "module m {",
+        "  val inv_live = true",
+        "  // val inv_old = true",
+        "  /// val inv_doc = true",
+        "  /* def inv_block = true */",
+        '  val s = "val inv_quoted = 1"',
+        "}",
+      ].join("\n");
+      expect(declaredInvariants(source)).toEqual(["inv_live"]);
+    });
+
+    it("ignores a commented-out module header before the real one", () => {
+      // `// module old {` never matched (the header must start the line), but a
+      // header on its own line inside a /* */ block did.
+      expect(moduleName("// module old {\n/*\nmodule older {\n*/\nmodule current {\n}")).toBe("current");
+    });
+  });
+
+  describe("direct mode with comments in the spec", () => {
+    const work = mkdtempSync(join(tmpdir(), "quint-comments-"));
+    afterAll(() => rmSync(work, { recursive: true, force: true }));
+    const variant = (name: string, edit: (spec: string) => string): string => {
+      const path = join(work, `${name}.md`);
+      writeFileSync(path, edit(fixture("passing")));
+      return path;
+    };
+    const beforeModuleEnd = (insert: string) => (spec: string) => spec.replace(/\n\}\n```/, `\n${insert}\n}\n\`\`\``);
+
+    it("passes when an inv_ is commented out", () => {
+      const path = variant(
+        "commented-invariant",
+        beforeModuleEnd("  // val inv_old = true\n  /* val inv_older =\n     true */"),
+      );
+      const { status, verdict } = runTool(["--file", path]);
+      expect(verdict).toMatchObject({ pass: true, phase: "ok", invariants: ["inv_conservation", "inv_nonNegative"] });
+      expect(status).toBe(0);
+    });
+
+    it("still fails when a live inv_ is missing from the configuration", () => {
+      const path = variant("unchecked-invariant", beforeModuleEnd("  // val inv_old = true\n  val inv_extra = true"));
+      const { status, verdict } = runTool(["--file", path]);
+      expect(verdict).toMatchObject({ pass: false, phase: "extract" });
+      expect(verdict.reason).toMatch(/not checked: inv_extra$/);
+      expect(status).toBe(1);
+    });
+
+    it("uses the real module name when an old header is commented out above it", () => {
+      const path = variant("commented-module", (spec) =>
+        spec.replace("```quint\nmodule inventory {", "```quint\n/*\nmodule inventory_v1 {\n*/\nmodule inventory {"),
+      );
+      const { status, verdict } = runTool(["--file", path]);
+      expect(verdict).toMatchObject({ pass: true, phase: "ok", module: "inventory" });
+      expect(status).toBe(0);
+    });
   });
 
   it.each([
