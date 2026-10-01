@@ -1,0 +1,19 @@
+{
+  "name": "quint",
+  "version": "0.1.0",
+  "description": "AI-DLC plugin that gates functional-design on a Quint behaviour check: the unit's workflows and business rules become a Quint spec whose invariants a blocking gate sensor simulates, and code-generation and ci-pipeline replay its traces against the implementation.",
+  "author": {
+    "name": "hideokamoto"
+  },
+  "dependencies": [
+    "core"
+  ],
+  "aidlc": {
+    "contributes": {
+      "knowledge": "knowledge/",
+      "overlays": "contributions/",
+      "sensors": "sensors/",
+      "tools": "tools/"
+    }
+  }
+}
