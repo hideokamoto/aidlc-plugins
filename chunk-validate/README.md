@@ -14,7 +14,15 @@ on to the sensor):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AIDLC_CHUNK_VALIDATE_COMMAND` | `test` | Gate command name passed to `chunk validate` (list them with `chunk validate --list`). Part of the cache key. |
-| `AIDLC_CHUNK_VALIDATE_TIMEOUT_MS` | `55000` | Time limit for `chunk validate`. Capped at 55000 so it stays under the manifest's `timeout_seconds: 60`. |
+
+## Run time limit
+
+The script sets no time limit of its own on `chunk validate`. The engine
+dispatcher enforces the manifest's `timeout_seconds` (60): when a run goes
+over, it kills the script and records `SENSOR_BUDGET_OVERRIDE` (verdict
+`budget-override`), never `SENSOR_PASSED`. The script does not kill `chunk`
+itself, because a script that gives up and exits non-zero is recorded as
+PASSED with a `script-error` note.
 
 ## What it contributes
 
@@ -40,7 +48,8 @@ command name, `git diff HEAD`, and the bytes of untracked, non-ignored files
 left out of the hash: the engine appends audit rows and writes sensor detail
 files there around every fire, so including it would change the hash on every
 fire and the cache would never hit. Those records are workflow artifacts, not
-inputs to the project's tests. Timed-out runs are not cached.
+inputs to the project's tests. A run the dispatcher kills writes no cache
+entry.
 
 ## Severity
 
@@ -50,8 +59,8 @@ the effective force comes from.
 
 ## Known limitations
 
-- `pass=false` means "`chunk validate` exited non-zero or timed out"
-  (`timedOut: true`). Real test failures confirmed in practice; sidecar
+- `pass=false` means "`chunk validate` exited non-zero". Real test failures
+  confirmed in practice; sidecar
   infrastructure failures look the same — check `output` in the detail file.
 - Validates the whole test suite, not just the file that triggered the write.
 
@@ -59,4 +68,5 @@ the effective force comes from.
 
 `tests/chunk-validate.test.ts` runs the script against a stub `chunk` (never
 the real one) and fires the sensor through the engine dispatcher in a project
-composed with this plugin. Run them with `pnpm test`.
+composed with this plugin, including a run that overruns the sensor's budget
+and is recorded as `budget-override`. Run them with `pnpm test`.

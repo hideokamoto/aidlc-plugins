@@ -13,10 +13,16 @@
 // このセンサーは「そのファイル」ではなくワーキングツリー全体のテストを
 // 検証するので、パスの値は出力 JSON には含めない。
 //
-// ⚠️未確定: `pass=false` は「`chunk validate` が非ゼロ終了した、または
-// タイムアウトした」の意味で、実テスト失敗(exitCode 1)であることは実測済み
-// だが、sidecar 側のインフラ障害との切り分けはできていない。確定したら
-// isChunkFailure() の判定か output の内容分岐を直す。
+// 実行時間: このスクリプトは `chunk validate` に自前の打ち切り時間を設けない。
+// 上限は dispatcher が manifest の `timeout_seconds` (60) で掛け、超えたら
+// このスクリプトごと kill して SENSOR_BUDGET_OVERRIDE を記録する
+// (aidlc-sensor.ts の truth table branch a)。自前で打ち切って exit 2 にすると
+// dispatcher はそれを PASSED (script-error) として記録してしまう。
+//
+// ⚠️未確定: `pass=false` は「`chunk validate` が非ゼロ終了した」の意味で、
+// 実テスト失敗(exitCode 1)であることは実測済みだが、sidecar 側のインフラ
+// 障害との切り分けはできていない。確定したら isChunkFailure() の判定か
+// output の内容分岐を直す。
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -31,7 +37,6 @@ interface SensorOutput {
   pass: boolean;
   exitCode: number | null;
   cached: boolean;
-  timedOut?: boolean;
   command: string;
   stage: string;
   output?: string;
@@ -44,17 +49,6 @@ const DEFAULT_CHUNK_COMMAND = "test";
 
 function chunkCommand(): string {
   return process.env.AIDLC_CHUNK_VALIDATE_COMMAND?.trim() || DEFAULT_CHUNK_COMMAND;
-}
-
-// `chunk validate` の打ち切り時間。manifest の timeout_seconds (60) より
-// 短くすること。長いと dispatcher が先にこのスクリプトごと kill し、
-// SENSOR_BUDGET_OVERRIDE になって pass/fail が届かない。
-// AIDLC_CHUNK_VALIDATE_TIMEOUT_MS で短くできる(上限はこの既定値)。
-const MAX_TIMEOUT_MS = 55_000;
-
-function validateTimeoutMs(): number {
-  const raw = Number(process.env.AIDLC_CHUNK_VALIDATE_TIMEOUT_MS);
-  return Number.isInteger(raw) && raw > 0 ? Math.min(raw, MAX_TIMEOUT_MS) : MAX_TIMEOUT_MS;
 }
 
 // キャッシュ置き場。.git/ 配下ならリポジトリ管理外で、かつ fire_on: write の
@@ -100,8 +94,8 @@ function printHelp(): void {
       `Wraps \`chunk validate <command>\` and prints {pass, exitCode, cached, command, stage, output} JSON to stdout.\n` +
       `--file-path is accepted as an alias of --output-path.\n\n` +
       `Environment:\n` +
-      `  AIDLC_CHUNK_VALIDATE_COMMAND     gate command name in .chunk/config.json (default: ${DEFAULT_CHUNK_COMMAND})\n` +
-      `  AIDLC_CHUNK_VALIDATE_TIMEOUT_MS  validation time limit in ms (default and maximum: ${MAX_TIMEOUT_MS})\n`,
+      `  AIDLC_CHUNK_VALIDATE_COMMAND  gate command name in .chunk/config.json (default: ${DEFAULT_CHUNK_COMMAND})\n\n` +
+      `No time limit of its own: the dispatcher's timeout_seconds bounds a run.\n`,
   );
 }
 
@@ -109,6 +103,9 @@ function printHelp(): void {
 
 // linter sensor と同じ理由: chunk バイナリ自体が無い/PATHに無い場合は
 // 「壊れている」ではなく「今回は静かにスキップ」として dispatcher に返す。
+// `chunk --version` はローカルで即答する存在確認なので、ここだけは短い
+// timeout を残す。これは検証の打ち切りではなく、応答しない probe で
+// dispatcher の予算を食い潰さないための保険(超えたら exit 2)。
 function probeChunkAvailable(): void {
   const result = spawnSync("chunk", ["--version"], {
     encoding: "utf-8",
@@ -235,35 +232,25 @@ function tail(text: string): string {
 
 interface ValidateResult {
   exitCode: number | null;
-  timedOut: boolean;
   output: string;
 }
 
 function runChunkValidate(command: string): ValidateResult {
-  const timeoutMs = validateTimeoutMs();
+  // timeout は付けない。上限は dispatcher の timeout_seconds が掛ける。
   const result = spawnSync("chunk", ["validate", command], {
     encoding: "utf-8",
-    timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
   });
   // 失敗時にエージェントが detail ファイルから原因を読めるよう、
   // 標準出力+標準エラーの末尾を JSON に載せる(センサーの output_schema
   // は pass だけだが、詳細ファイルにはこの JSON 全体が残る)。
   const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-  const errorCode = result.error && "code" in result.error ? result.error.code : undefined;
-  if (errorCode === "ETIMEDOUT") {
-    // 打ち切りは「テストが通ったと確認できなかった」。script error (exit 2)
-    // にすると dispatcher は PASSED として記録し、黙って通ってしまうので、
-    // pass:false として報告する。
-    const reason = `chunk validate ${command} timed out after ${Math.round(timeoutMs / 1000)}s and was killed; the result is unknown.`;
-    return { exitCode: null, timedOut: true, output: tail(combined ? `${reason}\n${combined}` : reason) };
-  }
   if (result.error) {
     // 実行時に急に chunk が消えた等、probe後の異常系。
     process.stderr.write(`chunk-exec-error: ${result.error.message}\n`);
     process.exit(2);
   }
-  return { exitCode: result.status, timedOut: false, output: tail(combined) };
+  return { exitCode: result.status, output: tail(combined) };
 }
 
 // --- main -------------------------------------------------------------------
@@ -289,17 +276,14 @@ export function main(argv: string[]): void {
     process.exit(0);
   }
 
-  const { exitCode, timedOut, output } = runChunkValidate(command);
-  const pass = !timedOut && !isChunkFailure(exitCode);
-
-  // タイムアウトは sidecar の混雑などで次は通りうるので、キャッシュしない。
-  if (!timedOut) writeCache({ hash, pass, exitCode, output });
+  const { exitCode, output } = runChunkValidate(command);
+  const pass = !isChunkFailure(exitCode);
+  writeCache({ hash, pass, exitCode, output });
 
   const out: SensorOutput = {
     pass,
     exitCode,
     cached: false,
-    ...(timedOut ? { timedOut } : {}),
     command,
     stage: args.stage,
     output,

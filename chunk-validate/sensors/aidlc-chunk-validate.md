@@ -29,9 +29,8 @@ Wraps `chunk validate <command>` の結果を報告する。`<command>` は
 | 環境変数 | 既定値 | 意味 |
 | --- | --- | --- |
 | `AIDLC_CHUNK_VALIDATE_COMMAND` | `test` | `chunk validate` に渡すゲートコマンド名(`chunk validate --list` で確認できる)。キャッシュキーにも含まれる |
-| `AIDLC_CHUNK_VALIDATE_TIMEOUT_MS` | `55000` | `chunk validate` の打ち切り時間(ミリ秒)。manifest の `timeout_seconds` (60) を超えないよう、55000 が上限 |
 
-どちらも engine がセンサーを起動するプロセス(Claude Code のセッション)の
+engine がセンサーを起動するプロセス(Claude Code のセッション)の
 環境に置く。
 
 ## Failure mode
@@ -42,9 +41,14 @@ Wraps `chunk validate <command>` の結果を報告する。`<command>` は
 `audit/<host>-<clone-id>.md` シャード中の `SENSOR_FIRED` 行にある8桁hex)。
 エージェントはこの詳細ファイルの `pass`/`exitCode`/`output` を読み、テストを直す。
 
-`chunk validate` が打ち切り時間内に終わらなかった場合も `pass: false`
-(`timedOut: true`, `exitCode: null`)として報告する。テストが通ったと確認
-できていないものを PASSED にしないため。タイムアウトの結果はキャッシュしない。
+## Run time limit
+
+スクリプト自身は `chunk validate` に打ち切り時間を設けない。1回の実行の
+上限は dispatcher がこの manifest の `timeout_seconds` (60) で掛け、超えたら
+スクリプトごと kill して `SENSOR_BUDGET_OVERRIDE`(verdict `budget-override`)
+を記録する。`SENSOR_PASSED` にはならない。スクリプトが自前で打ち切って
+非ゼロ終了すると dispatcher は PASSED (`script-error`) として記録してしまう
+ため、打ち切りは dispatcher に任せる。kill された実行はキャッシュを書かない。
 
 ## Advisory note
 
@@ -67,8 +71,7 @@ Wraps `chunk validate <command>` の結果を報告する。`<command>` は
   発火のたびに記録の audit シャードへ行を追記し、詳細ファイルを書くので、
   含めるとキャッシュが一度も当たらない。`aidlc/` はワークフローの成果物で
   あってテストの入力ではないため、除外しても古い結果は返らない。
-- `pass=false` は「`chunk validate` が非ゼロ終了した、またはタイムアウトした」
-  の意味。実テスト失敗が `pass:false, exitCode:1` として届くことは実測済み。
+- `pass=false` は「`chunk validate` が非ゼロ終了した」の意味。実テスト失敗が `pass:false, exitCode:1` として届くことは実測済み。
   ただし sidecar 側のインフラ障害(認証切れ、プール枯渇、ネットワーク等)との
   切り分けは未実装で、インフラ起因も同じ形で `SENSOR_FAILED` になる。
   診断用に chunk の stdout/stderr 末尾を JSON の `output` フィールドに

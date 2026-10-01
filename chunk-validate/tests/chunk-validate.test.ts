@@ -4,7 +4,7 @@
 // The stub records each invocation, so tests can tell a fresh run from a
 // cache hit.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -33,18 +33,21 @@ interface Stub {
   path: string;
   /** Arguments of every `chunk validate ...` call so far. */
   validateCalls(): string[];
+  /** Kill a still-sleeping `chunk validate` (the dispatcher kills only the script, not its child). */
+  killSleeper(): void;
 }
 
 /** A fake `chunk`: answers `--version`, and `validate` with the given exit status after an optional sleep. */
 function stubChunk(opts: { exit?: number; sleepSeconds?: number } = {}): Stub {
   const dir = tempDir("chunk-stub-");
   const log = join(dir, "calls.log");
+  const pidFile = join(dir, "sleeper.pid");
   const script = [
     "#!/bin/sh",
     `echo "$*" >> '${log}'`,
     'if [ "$1" = "--version" ]; then echo "chunk stub 0.0.0"; exit 0; fi',
-    // exec, so the timeout's SIGTERM reaches the sleeping process itself.
-    opts.sleepSeconds ? `exec sleep ${opts.sleepSeconds}` : "",
+    // exec keeps the pid, so the test can kill the sleeper it leaves behind.
+    opts.sleepSeconds ? `echo $$ > '${pidFile}'; exec sleep ${opts.sleepSeconds}` : "",
     `echo "stub: chunk $*"`,
     `exit ${opts.exit ?? 0}`,
     "",
@@ -59,6 +62,14 @@ function stubChunk(opts: { exit?: number; sleepSeconds?: number } = {}): Stub {
             .split("\n")
             .filter((line) => line.startsWith("validate"))
         : [],
+    killSleeper: () => {
+      if (!existsSync(pidFile)) return;
+      try {
+        process.kill(Number(readFileSync(pidFile, "utf-8").trim()), "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    },
   };
 }
 
@@ -80,7 +91,7 @@ function runTool(args: string[], cwd: string, env: Record<string, string>) {
   const result = spawnSync(BUN, [TOOL, ...args], {
     cwd,
     encoding: "utf-8",
-    env: { ...process.env, AIDLC_CHUNK_VALIDATE_COMMAND: "", AIDLC_CHUNK_VALIDATE_TIMEOUT_MS: "", ...env },
+    env: { ...process.env, AIDLC_CHUNK_VALIDATE_COMMAND: "", ...env },
   });
   const line = (result.stdout ?? "").trim().split("\n").pop() ?? "";
   return { status: result.status, stderr: result.stderr, verdict: line ? JSON.parse(line) : null };
@@ -122,33 +133,6 @@ describe("aidlc-sensor-chunk-validate script", () => {
     const empty = tempDir("empty-path-");
     const out = runTool(["--stage", "code-generation", "--output-path", "src/index.ts"], project, { PATH: empty });
     expect(out.status).toBe(127);
-  });
-
-  it("reports a timed-out validation as pass:false, not as a script error", () => {
-    const project = gitProject();
-    const stub = stubChunk({ sleepSeconds: 30 });
-    const started = Date.now();
-    const out = runTool(["--stage", "code-generation", "--output-path", "src/index.ts"], project, {
-      PATH: stub.path,
-      AIDLC_CHUNK_VALIDATE_TIMEOUT_MS: "1000",
-    });
-    expect(Date.now() - started).toBeLessThan(20_000);
-    expect(out.status).toBe(0);
-    expect(out.verdict).toMatchObject({ pass: false, timedOut: true, cached: false });
-    expect(out.verdict.output).toMatch(/timed out after 1s/);
-  });
-
-  it("does not cache a timed-out result", () => {
-    const project = gitProject();
-    const slow = stubChunk({ sleepSeconds: 30 });
-    runTool(["--stage", "code-generation", "--output-path", "src/index.ts"], project, {
-      PATH: slow.path,
-      AIDLC_CHUNK_VALIDATE_TIMEOUT_MS: "1000",
-    });
-    const fast = stubChunk();
-    const out = runTool(["--stage", "code-generation", "--output-path", "src/index.ts"], project, { PATH: fast.path });
-    expect(out.verdict).toMatchObject({ pass: true, cached: false });
-    expect(fast.validateCalls()).toHaveLength(1);
   });
 
   it("reuses the cached result when only the AI-DLC record tree changed", () => {
@@ -212,6 +196,14 @@ describe.each(pinnedVersions())("aidlc %s installed project", (version) => {
     return JSON.parse(result.stdout.trim().split("\n").pop()!);
   }
 
+  /** Every audit shard the engine wrote in the project, concatenated. */
+  function auditTail(): string {
+    return (readdirSync(project, { recursive: true }) as string[])
+      .filter((p) => /(^|\/)audit\/[^/]+\.md$/.test(p) && !p.startsWith(".claude/"))
+      .map((p) => readFileSync(join(project, p), "utf-8"))
+      .join("\n");
+  }
+
   it.each([
     [1, "failed"],
     [0, "passed"],
@@ -231,5 +223,35 @@ describe.each(pinnedVersions())("aidlc %s installed project", (version) => {
     expect(fire(stub)).toMatchObject({ result: "passed" });
     expect(fire(stub)).toMatchObject({ result: "passed" });
     expect(stub.validateCalls()).toHaveLength(1);
+  });
+
+  it("records a run that outlasts the sensor's timeout_seconds as budget-override, not passed", () => {
+    // The script has no time limit of its own: the dispatcher enforces the
+    // manifest's timeout_seconds and kills the script. A 2s budget stands in
+    // for the shipped 60s; the dispatcher reads the manifest at fire time.
+    const manifestPath = join(project, ".claude", "sensors", "aidlc-chunk-validate.md");
+    const shipped = readFileSync(manifestPath, "utf-8");
+    expect(shipped).toContain("timeout_seconds: 60\n");
+    writeFileSync(manifestPath, shipped.replace("timeout_seconds: 60\n", "timeout_seconds: 2\n"));
+    writeFileSync(source, "export const slow = true;\n");
+    const stub = stubChunk({ sleepSeconds: 30 });
+    try {
+      const started = Date.now();
+      const verdict = fire(stub);
+      expect(Date.now() - started).toBeLessThan(20_000);
+      expect(verdict).toMatchObject({ sensor_id: "chunk-validate", result: "budget-override" });
+      expect(verdict.result).not.toBe("passed");
+      expect(stub.validateCalls()).toEqual(["validate test"]);
+      expect(auditTail()).toContain("SENSOR_BUDGET_OVERRIDE");
+
+      // The killed run left no cache entry: the next fire runs chunk again.
+      writeFileSync(manifestPath, shipped);
+      const fast = stubChunk();
+      expect(fire(fast)).toMatchObject({ result: "passed" });
+      expect(fast.validateCalls()).toEqual(["validate test"]);
+    } finally {
+      stub.killSleeper();
+      writeFileSync(manifestPath, shipped);
+    }
   });
 });
