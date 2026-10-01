@@ -28,12 +28,15 @@ auto-update for the marketplace in `/plugin`.
 
 | Plugin | What it adds |
 |---|---|
+| `aidlc-alloy` | Blocking gate on functional-design: an Alloy model of the unit's entities and rules must have no counterexample; code-generation turns its asserts into fast-check properties. See `alloy/README.md`. |
 | `aidlc-chunk-validate` | Advisory sensor that runs `chunk validate test` on a Chunk sidecar on every `*.ts`/`*.tsx` write during `code-generation`. See `chunk-validate/README.md`. |
+| `aidlc-quint` | Blocking gate on functional-design: a Quint spec of the unit's workflows and rules must keep its invariants under simulation; code-generation and ci-pipeline replay its traces. See `quint/README.md`. |
 | `aidlc-solo-developer` | Lets one `SOLO-DEVELOPER:` memory line answer intent-capture's stakeholder, decision-maker, and reporting questions. See `solo-developer/README.md`. |
 
 ## Development
 
-Requirements: Node.js 22, pnpm, and bun (runs the AI-DLC plugin tooling).
+Requirements: Node.js 22, pnpm, bun (runs the AI-DLC plugin tooling), and a Java
+runtime (the alloy plugin's tests run Alloy 6.2.0, downloaded into `.aidlc-cache/`).
 
 ```bash
 pnpm install
