@@ -1,0 +1,19 @@
+{
+  "name": "alloy",
+  "version": "0.1.0",
+  "description": "AI-DLC plugin that gates functional-design on an Alloy structural check: the unit's entities and business rules become an Alloy model whose asserts a blocking gate sensor checks for counterexamples, and code-generation turns the approved asserts into fast-check property tests.",
+  "author": {
+    "name": "hideokamoto"
+  },
+  "dependencies": [
+    "core"
+  ],
+  "aidlc": {
+    "contributes": {
+      "knowledge": "knowledge/",
+      "overlays": "contributions/",
+      "sensors": "sensors/",
+      "tools": "tools/"
+    }
+  }
+}
