@@ -1,6 +1,8 @@
 // Release CLI, run by CD on main.
 //
-//   check              fail when a released plugin changed without a version bump
+//   check              fail when a released plugin's shipped files or build core
+//                      (first aidlc-versions.json entry) changed without a
+//                      version bump
 //   plan               list plugins whose current version is not tagged yet
 //   publish [--dry-run]
 //                      build every plugin, commit main + build outputs onto the
@@ -22,12 +24,13 @@ import {
   commitsSince,
   git,
   listTags,
-  missingVersionBumps,
   pendingReleases,
   planPublish,
   previousTag,
   releaseTag,
   renderChangelog,
+  versionBumpReasons,
+  type StaleRelease,
 } from "./lib/release.ts";
 import { buildVersion, fetchRuntime } from "./lib/runtime.ts";
 
@@ -37,6 +40,12 @@ const repoSlug = process.env.GITHUB_REPOSITORY ?? "hideokamoto/aidlc-plugins";
 function fail(message: string): never {
   console.error(message);
   process.exit(1);
+}
+
+function describeStale(stale: StaleRelease[]): string {
+  return stale
+    .map(({ plugin, reasons }) => `${plugin.key}: ${reasons.join("; ")}; bump .aidlc-plugin/plugin.json version`)
+    .join("\n");
 }
 
 function authArgs(token: string): string[] {
@@ -124,10 +133,8 @@ async function publish(dryRun: boolean): Promise<void> {
 
   const plugins = discoverPlugins();
   const tags = listTags(REPO_ROOT);
-  const stale = missingVersionBumps(REPO_ROOT, plugins, tags);
-  if (stale.length > 0) {
-    fail(`version bump required before release: ${stale.map((plugin) => plugin.key).join(", ")}`);
-  }
+  const stale = versionBumpReasons(REPO_ROOT, plugins, tags);
+  if (stale.length > 0) fail(`version bump required before release:\n${describeStale(stale)}`);
 
   const releasedTags = new Set<string>();
   for (const plugin of plugins) {
@@ -208,15 +215,9 @@ async function publish(dryRun: boolean): Promise<void> {
 const [command, ...rest] = process.argv.slice(2);
 if (command === "check") {
   const plugins = discoverPlugins();
-  const stale = missingVersionBumps(REPO_ROOT, plugins, listTags(REPO_ROOT));
-  if (stale.length > 0) {
-    fail(
-      stale
-        .map((plugin) => `${plugin.key}: shipped files changed since ${releaseTag(plugin)}; bump .aidlc-plugin/plugin.json version`)
-        .join("\n"),
-    );
-  }
-  console.log("ok: every released plugin with shipped changes has a new version");
+  const stale = versionBumpReasons(REPO_ROOT, plugins, listTags(REPO_ROOT));
+  if (stale.length > 0) fail(describeStale(stale));
+  console.log("ok: every released plugin with shipped or build-core changes has a new version");
 } else if (command === "plan") {
   const pending = pendingReleases(discoverPlugins(), listTags(REPO_ROOT));
   console.log(pending.length === 0 ? "nothing to release" : pending.map(releaseTag).join("\n"));
