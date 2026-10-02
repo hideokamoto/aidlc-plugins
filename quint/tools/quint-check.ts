@@ -189,13 +189,28 @@ export function section(markdown: string, title: string, level = 2): string | nu
   return (end === -1 ? rest : rest.slice(0, end)).map((l) => l.text).join("\n");
 }
 
-export function moduleName(source: string): string | null {
-  return /^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/m.exec(source)?.[1] ?? null;
+// Quint's lexer, as checked against quint 0.33.0: `//` runs to the end of the
+// line (`///` doc comments included); a block comment `/* ... */` does not
+// nest, the first `*/` closes it; a string is `"..."` with no escape
+// sequences and may span lines, so `//` or `/*` inside one is not a comment.
+const COMMENT_OR_STRING = /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|"[^"]*"?/g;
+
+/**
+ * The source with every comment and string literal replaced by spaces (line
+ * breaks kept), so regex scans for declarations see only code.
+ */
+export function stripCommentsAndStrings(source: string): string {
+  return source.replace(COMMENT_OR_STRING, (match) => match.replace(/[^\n]/g, " "));
 }
 
-/** Every `val inv_*` / `def inv_*` name in the module. */
+export function moduleName(source: string): string | null {
+  return /^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/m.exec(stripCommentsAndStrings(source))?.[1] ?? null;
+}
+
+/** Every `val inv_*` / `def inv_*` name in the module, ignoring comments and strings. */
 export function declaredInvariants(source: string): string[] {
-  return [...new Set([...source.matchAll(/\b(?:val|def)\s+(inv_[A-Za-z0-9_]*)\s*=/g)].map((m) => m[1]))];
+  const code = stripCommentsAndStrings(source);
+  return [...new Set([...code.matchAll(/\b(?:val|def)\s+(inv_[A-Za-z0-9_]*)\s*=/g)].map((m) => m[1]))];
 }
 
 export type Extracted =
