@@ -13,7 +13,8 @@ fragments:
 
 chunk-validate プラグインは、このステージに ADVISORY センサーを1本だけ配線する:
 `chunk-validate`(このプロジェクトの Chunk sidecar 上で、今書いたコードに対して
-`chunk validate test` を実行する)。これはプロジェクト自身のテストスイートが
+`chunk validate <ゲートコマンド>` を実行する。ゲートコマンドは環境変数
+`AIDLC_CHUNK_VALIDATE_COMMAND`、未指定なら `test`)。これはプロジェクト自身のテストスイートが
 通るかどうかを「報告」するだけで、ステージをブロックしない
 (フレームワークにはまだ blocking severity が存在しない)。この報告は
 権威ある指示として扱うこと: `pass: false` が返ってきたら、

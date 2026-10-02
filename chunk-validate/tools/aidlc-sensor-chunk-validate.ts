@@ -6,35 +6,50 @@
 //   1   stdout の出力がパースできない(dispatcher branch f)
 //   2   スクリプト自体のエラー(dispatcher branch e: SENSOR_PASSED, Note=script-error)
 //
-// --file-path は契約として受け取るが、このセンサーは「そのファイル」ではなく
-// ワーキングツリー全体のテストを検証する。契約を握るのは dispatcher なので
-// 必須のままにしておき、値は出力 JSON には含めない。
+// 引数: engine の dispatcher (aidlc-sensor.ts) は組み込みの linter / type-check
+// 以外のすべてのセンサーに `--stage <slug> --output-path <絶対パス>` を渡す。
+// プラグインのセンサーはこちらの形で呼ばれるので `--output-path` を受け取る。
+// `--file-path` は以前の契約との互換のための別名として残す。
+// このセンサーは「そのファイル」ではなくワーキングツリー全体のテストを
+// 検証するので、パスの値は出力 JSON には含めない。
+//
+// 実行時間: このスクリプトは `chunk validate` に自前の打ち切り時間を設けない。
+// 上限は dispatcher が manifest の `timeout_seconds` (60) で掛け、超えたら
+// このスクリプトごと kill して SENSOR_BUDGET_OVERRIDE を記録する
+// (aidlc-sensor.ts の truth table branch a)。自前で打ち切って exit 2 にすると
+// dispatcher はそれを PASSED (script-error) として記録してしまう。
 //
 // ⚠️未確定: `pass=false` は「`chunk validate` が非ゼロ終了した」の意味で、
 // 実テスト失敗(exitCode 1)であることは実測済みだが、sidecar 側のインフラ
 // 障害との切り分けはできていない。確定したら isChunkFailure() の判定か
 // output の内容分岐を直す。
 
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 
 interface Args {
   stage: string;
-  filePath: string;
+  outputPath: string;
 }
 
 interface SensorOutput {
   pass: boolean;
   exitCode: number | null;
   cached: boolean;
+  command: string;
   stage: string;
   output?: string;
 }
 
-// このプロジェクトの .chunk/config.json 上のゲートコマンド名。
-// `chunk validate --list` で確認した値(このプロジェクトでは "test")。
-const CHUNK_COMMAND = "test";
+// `chunk validate <command>` に渡すゲートコマンド名(.chunk/config.json 上の
+// 名前。`chunk validate --list` で確認できる)。プロジェクトごとに違うので
+// 環境変数で指定し、未指定なら "test"。
+const DEFAULT_CHUNK_COMMAND = "test";
+
+function chunkCommand(): string {
+  return process.env.AIDLC_CHUNK_VALIDATE_COMMAND?.trim() || DEFAULT_CHUNK_COMMAND;
+}
 
 // キャッシュ置き場。.git/ 配下ならリポジトリ管理外で、かつ fire_on: write の
 // matches ("**/*.{ts,tsx}") にも引っかからない。
@@ -47,13 +62,13 @@ const OUTPUT_TAIL_LIMIT = 4 * 1024;
 
 function parseArgs(argv: string[]): Args {
   let stage = "";
-  let filePath = "";
+  let outputPath = "";
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--stage") {
       stage = argv[++i] ?? "";
-    } else if (a === "--file-path") {
-      filePath = argv[++i] ?? "";
+    } else if (a === "--output-path" || a === "--file-path") {
+      outputPath = argv[++i] ?? "";
     } else if (a === "--help" || a === "-h") {
       printHelp();
       process.exit(0);
@@ -66,17 +81,21 @@ function parseArgs(argv: string[]): Args {
     process.stderr.write("missing required flag: --stage\n");
     process.exit(1);
   }
-  if (!filePath) {
-    process.stderr.write("missing required flag: --file-path\n");
+  if (!outputPath) {
+    process.stderr.write("missing required flag: --output-path\n");
     process.exit(1);
   }
-  return { stage, filePath };
+  return { stage, outputPath };
 }
 
 function printHelp(): void {
   process.stdout.write(
-    `Usage: aidlc-sensor-chunk-validate --stage <slug> --file-path <path>\n\n` +
-      `Wraps \`chunk validate ${CHUNK_COMMAND}\` and prints {pass, exitCode, cached, stage, output} JSON to stdout.\n`,
+    `Usage: aidlc-sensor-chunk-validate --stage <slug> --output-path <path>\n\n` +
+      `Wraps \`chunk validate <command>\` and prints {pass, exitCode, cached, command, stage, output} JSON to stdout.\n` +
+      `--file-path is accepted as an alias of --output-path.\n\n` +
+      `Environment:\n` +
+      `  AIDLC_CHUNK_VALIDATE_COMMAND  gate command name in .chunk/config.json (default: ${DEFAULT_CHUNK_COMMAND})\n\n` +
+      `No time limit of its own: the dispatcher's timeout_seconds bounds a run.\n`,
   );
 }
 
@@ -84,6 +103,9 @@ function printHelp(): void {
 
 // linter sensor と同じ理由: chunk バイナリ自体が無い/PATHに無い場合は
 // 「壊れている」ではなく「今回は静かにスキップ」として dispatcher に返す。
+// `chunk --version` はローカルで即答する存在確認なので、ここだけは短い
+// timeout を残す。これは検証の打ち切りではなく、応答しない probe で
+// dispatcher の予算を食い潰さないための保険(超えたら exit 2)。
 function probeChunkAvailable(): void {
   const result = spawnSync("chunk", ["--version"], {
     encoding: "utf-8",
@@ -118,20 +140,36 @@ function probeChunkAvailable(): void {
 //   - untracked: `git ls-files --others --exclude-standard` の各ファイル内容
 // を sha256 に流す。全ファイルを読むので大規模 repo では重いが、
 // .gitignore 適用後の untracked だけなので実用上は十分軽い。
+//
+// AI-DLC のワークスペース `aidlc/` はハッシュから除外する。engine は発火の
+// たびに、このスクリプトの前後でアクティブな記録
+// (`aidlc/spaces/<space>/intents/<record>/`) に audit 行
+// (`audit/<host>-<clone>.md` への SENSOR_FIRED / SENSOR_PASSED 等) を追記し、
+// 失敗時は `.aidlc-engine/sensors/` に詳細ファイルを書く。これを含めると
+// 前回の発火そのものがハッシュを変え、キャッシュが一度も当たらない。
+// `aidlc/` の中身(記録・監査ログ・memory)はワークフローの成果物であって、
+// プロジェクトのテストスイートの入力ではない。テストが読むのはソースコードと
+// その設定なので、ここが変わっても `chunk validate` の結果は変わらない。
+// ゆえに除外してもキャッシュが古い結果を返すことはない。
+const WORKSPACE_EXCLUDE = ":(exclude)aidlc/";
+
 const HASH_FILE_SIZE_LIMIT = 1024 * 1024;
 
-function workingTreeHash(): string {
+function git(args: string[]): string {
+  return execFileSync("git", args, {
+    encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+}
+
+function workingTreeHash(command: string): string {
   try {
     const h = createHash("sha256");
-    h.update(
-      execSync("git diff HEAD --binary", {
-        encoding: "utf-8",
-        maxBuffer: 16 * 1024 * 1024,
-      }),
-    );
-    const untracked = execSync("git ls-files --others --exclude-standard", {
-      encoding: "utf-8",
-    })
+    // 同じツリーでもゲートコマンドが違えば結果は別物。
+    h.update(`command:${command}\0`);
+    h.update(git(["diff", "HEAD", "--binary", "--", ".", WORKSPACE_EXCLUDE]));
+    const untracked = git(["ls-files", "--others", "--exclude-standard", "--", ".", WORKSPACE_EXCLUDE])
       .split("\n")
       .filter((p) => p.length > 0)
       .sort();
@@ -182,7 +220,7 @@ function writeCache(cache: Cache): void {
 // --- chunk validate 実行 ---------------------------------------------------
 
 function isChunkFailure(exitCode: number | null): boolean {
-  // null は spawn が起動すらしなかった/シグナル終了。保守的に失敗扱い。
+  // null はシグナル終了。保守的に失敗扱い。
   return exitCode !== 0;
 }
 
@@ -192,23 +230,26 @@ function tail(text: string): string {
     : text;
 }
 
-function runChunkValidate(): { exitCode: number | null; output: string } {
-  const result = spawnSync("chunk", ["validate", CHUNK_COMMAND], {
+interface ValidateResult {
+  exitCode: number | null;
+  output: string;
+}
+
+function runChunkValidate(command: string): ValidateResult {
+  // timeout は付けない。上限は dispatcher の timeout_seconds が掛ける。
+  const result = spawnSync("chunk", ["validate", command], {
     encoding: "utf-8",
-    // manifest の timeout_seconds より短く設定すること。長いと
-    // SENSOR_BUDGET_OVERRIDE より先にこちらが黙ってタイムアウトする。
-    timeout: 55_000,
     maxBuffer: 8 * 1024 * 1024,
   });
+  // 失敗時にエージェントが detail ファイルから原因を読めるよう、
+  // 標準出力+標準エラーの末尾を JSON に載せる(センサーの output_schema
+  // は pass だけだが、詳細ファイルにはこの JSON 全体が残る)。
+  const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   if (result.error) {
     // 実行時に急に chunk が消えた等、probe後の異常系。
     process.stderr.write(`chunk-exec-error: ${result.error.message}\n`);
     process.exit(2);
   }
-  // 失敗時にエージェントが detail ファイルから原因を読めるよう、
-  // 標準出力+標準エラーの末尾を JSON に載せる(センサーの output_schema
-  // は pass だけだが、詳細ファイルにはこの JSON 全体が残る)。
-  const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   return { exitCode: result.status, output: tail(combined) };
 }
 
@@ -216,16 +257,18 @@ function runChunkValidate(): { exitCode: number | null; output: string } {
 
 export function main(argv: string[]): void {
   const args = parseArgs(argv);
+  const command = chunkCommand();
 
   probeChunkAvailable();
 
-  const hash = workingTreeHash();
+  const hash = workingTreeHash(command);
   const cached = readCache();
   if (cached && cached.hash === hash) {
     const out: SensorOutput = {
       pass: cached.pass,
       exitCode: cached.exitCode,
       cached: true,
+      command,
       stage: args.stage,
       ...(cached.output ? { output: cached.output } : {}),
     };
@@ -233,12 +276,18 @@ export function main(argv: string[]): void {
     process.exit(0);
   }
 
-  const { exitCode, output } = runChunkValidate();
+  const { exitCode, output } = runChunkValidate(command);
   const pass = !isChunkFailure(exitCode);
-
   writeCache({ hash, pass, exitCode, output });
 
-  const out: SensorOutput = { pass, exitCode, cached: false, stage: args.stage, output };
+  const out: SensorOutput = {
+    pass,
+    exitCode,
+    cached: false,
+    command,
+    stage: args.stage,
+    output,
+  };
   process.stdout.write(`${JSON.stringify(out)}\n`);
   process.exit(0);
 }
