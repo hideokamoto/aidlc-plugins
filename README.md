@@ -24,6 +24,41 @@ the project's `.claude/` projection. Updates reach you when a plugin's version
 changes: run `/plugin marketplace update aidlc-plugins`, or turn on
 auto-update for the marketplace in `/plugin`.
 
+### Installing several plugins: check that every one is composed
+
+Each plugin ships its own SessionStart hook, and Claude Code runs all matching
+hooks in parallel. With AI-DLC 2.10.0, the concurrent plugin syncs race inside
+AI-DLC core: a hook can fail with `source changed after planning`, or every
+hook exits 0 while one or more
+plugins are silently not composed. A missing `aidlc-alloy` or `aidlc-quint`
+means its blocking gate is not enforced. Starting another session does not
+reliably repair it. The race is in AI-DLC core, not in these plugins.
+
+After installing or updating more than one plugin, run from the project root
+in a terminal (not from a hook, so `CLAUDE_PLUGIN_ROOT` is unset):
+
+```bash
+bun .claude/tools/aidlc.ts engine plugin list   # every STATUS must read "current"
+bun .claude/tools/aidlc.ts engine plugin sync   # composes all installed plugins in one run
+```
+
+`list` exits 0 even when a plugin is not composed; a broken project shows
+`run: aidlc config` in STATUS for the missing plugin. One `sync` without
+`CLAUDE_PLUGIN_ROOT` reads Claude's plugin registry and composes every
+installed plugin in a single transaction; later parallel session-start hooks
+then find nothing to do.
+
+If the same plugin is installed at project scope in more than one project,
+`list` and `sync` report `installed plugin identity "<name>" is ambiguous` and
+`sync` refuses. Sync the plugins one at a time instead, using each `installPath`
+from `~/.claude/plugins/installed_plugins.json`:
+
+```bash
+CLAUDE_PLUGIN_ROOT="$HOME/.claude/plugins/cache/aidlc-plugins/aidlc-alloy/<version>" \
+  bun .claude/tools/aidlc-plugin.ts sync
+# repeat for each installed aidlc-* plugin, sequentially
+```
+
 ## Plugins
 
 | Plugin | What it adds |
